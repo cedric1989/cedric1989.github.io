@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ana Sayfa</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 0;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .container {
+            max-width: 800px;
+            margin: 20px;
+            padding: 40px;
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 20px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+            text-align: center;
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 20px;
+            font-size: 2.5rem;
+        }
+        p {
+            color: #666;
+            line-height: 1.6;
+            font-size: 1.1rem;
+            margin-bottom: 30px;
+        }
+        .links {
+            display: flex;
+            gap: 20px;
+            justify-content: center;
+            flex-wrap: wrap;
+            margin-top: 30px;
+        }
+        .link {
+            background: #667eea;
+            color: white;
+            padding: 12px 24px;
+            text-decoration: none;
+            border-radius: 50px;
+            transition: all 0.3s ease;
+            font-weight: 500;
+        }
+        .link:hover {
+            background: #764ba2;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+        }
+        .feature {
+            background: #f8f9fa;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 10px;
+            border-left: 4px solid #667eea;
+        }
+        @media (max-width: 600px) {
+            .container {
+                margin: 10px;
+                padding: 20px;
+            }
+            h1 {
+                font-size: 2rem;
+            }
+            .links {
+                flex-direction: column;
+                align-items: center;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 Hoş Geldiniz!</h1>
+        <p>Bu sitenin ana sayfasına hoş geldiniz. Burası tamamen size ait olan dijital alanınız.</p>
+        
+        <div class="feature">
+            <h3>✨ Modern Tasarım</h3>
+            <p>Responsive ve kullanıcı dostu tasarım ile tüm cihazlarda mükemmel görünüm.</p>
+        </div>
+        
+        <div class="feature">
+            <h3>🔒 Güvenli</h3>
+            <p>HTTPS ile güvenli bağlantı ve GitHub Pages altyapısı.</p>
+        </div>
+        
+        <div class="feature">
+            <h3>⚡ Hızlı</h3>
+            <p>Optimize edilmiş kod yapısı ile hızlı yükleme süreleri.</p>
+        </div>
+        
+        <div class="links">
+            <a href="privacy-policy.html" class="link">🛡️ Gizlilik Politikası</a>
+            <a href="terms-of-service.html" class="link">📋 Kullanım Şartları</a>
+        </div>
+        
+        <p style="margin-top: 40px; font-size: 0.9rem; color: #999;">
+            © 2025 - Tüm hakları saklıdır.
+        </p>
+    </div>
+</body>
+</html>
