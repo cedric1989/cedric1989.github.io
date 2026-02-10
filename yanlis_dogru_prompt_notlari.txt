@@ -1,0 +1,102 @@
+CHATGPT FREELANCE — YANLIŞ → DOĞRU PROMPT NOTLARIM (KOPYALA/YAPIŞTIR)
+(İnsan notu gibi: kısa, net, süslü değil)
+
+------------------------------------------------------------
+0) HIZLI KURAL (aklımda tutacağım)
+YANLIŞ = “Şunu yap, SEO olsun.” gibi boş.
+DOĞRU = Rol + Kime + Amaç + Kısıt + Çıktı formatı.
+
+------------------------------------------------------------
+1) B2B MAIL + TEKLİF (KOBİ’ye satış / görüşme almak)
+
+YANLIŞ PROMPT:
+“Şu firmaya mail yaz, hizmetimi sat.”
+
+DOĞRU PROMPT:
+“B2B satış maili yaz.
+Sektör: [ör. klinik / muhasebe / e‑ticaret]
+Hedef kişi: [işletme sahibi / pazarlama sorumlusu]
+Hizmet: [ör. sosyal medya yönetimi / web sitesi / reklam]
+Amaç: 15 dk görüşme
+Ton: net + saygılı (yalakalık yok)
+Kısıt: 120–150 kelime
+Çıktı: 3 konu satırı + mail + 1 takip maili + 3 maddelik mini teklif.”
+
+------------------------------------------------------------
+2) E‑TİCARET ÜRÜN AÇIKLAMASI + SEO (Trendyol/Shopify)
+
+YANLIŞ PROMPT:
+“Bu ürüne SEO açıklama yaz.”
+
+DOĞRU PROMPT:
+“E‑ticaret ürün metni yaz.
+Ürün: [adı] / kategori: [kategori]
+Hedef kitle: [kim?]
+Kullanım: [nerede/kim kullanır?]
+Ton: güven veren, abartısız
+Kısıt:
+- Başlık: 60 karakter
+- Meta: 150–160 karakter
+- Açıklama: 120–160 kelime
+Çıktı: Başlık + meta + açıklama + 5 özellik maddesi + 5 SSS.”
+
+------------------------------------------------------------
+3) SOSYAL MEDYA İÇERİK PAKETİ (IG Reels + LinkedIn)
+
+YANLIŞ PROMPT:
+“14 içerik fikri ver.”
+
+DOĞRU PROMPT:
+“14 günlük içerik planı hazırla.
+Marka: [sektör]
+Hedef: [lead / satış / bilinirlik]
+Hedef kitle: [kısa tanım]
+Ton: [resmi / net / samimi]
+Kısıt: Reels caption max 220 karakter
+Çıktı:
+- 14 gün tablo
+- Her gün: hook + caption + CTA + 5 hashtag
+- 3 seri fikri (seri isimleriyle).”
+
+------------------------------------------------------------
+4) CV + LINKEDIN + ATS (iş başvurusu paketi)
+
+YANLIŞ PROMPT:
+“CV’mi düzelt.”
+
+DOĞRU PROMPT:
+“ATS uyumlu CV ve LinkedIn yaz.
+Pozisyon: [örn. data analyst / frontend]
+Deneyim notlarım: [3–6 madde ham not]
+Anahtar kelimeler: [liste]
+Ton: net, ölçülebilir
+Çıktı:
+- CV’ye 6 madde (eylem fiili + metrik)
+- LinkedIn About (120–160 kelime)
+- 10 ATS keyword
+- Recruiter’a 3 kısa mesaj.”
+
+------------------------------------------------------------
+5) MEDYA KİTİ / SPONSOR SUNUMU (YouTube/Kick)
+
+YANLIŞ PROMPT:
+“Bana sponsor sunumu yaz.”
+
+DOĞRU PROMPT:
+“1 sayfalık medya kiti metni yaz.
+Kanal: [adı] / niş: [oyun/teknoloji]
+Kitle: [yaş, ülke, ilgi alanı]
+Hedef sponsor: [kategori/marka tipi]
+Amaç: sponsor görüşmesi almak
+Ton: premium ama kısa
+Çıktı:
+- Başlıklar: Kitle / İçerik / Paketler / Örnek entegrasyon
+- 3 sponsorluk paket adı + fiyat aralığı (TRY)
+- 120–150 kelime sponsor maili + net CTA.”
+
+------------------------------------------------------------
+BİTİRİRKEN (kendime not)
+Eğer sonuç “yapay/robotik” geldiyse:
+1) “Daha kısa ve insan gibi yaz” de.
+2) “Türkçe, kurumsal ama doğal” diye tekrar kısıt koy.
+3) “Madde madde, sonra 1 paragraf” formatını iste.
