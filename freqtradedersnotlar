@@ -1,0 +1,304 @@
+1) docker-compose.yml
+services:
+  freqtrade:
+    image: freqtradeorg/freqtrade:stable
+    container_name: freqtrade
+    restart: unless-stopped
+    volumes:
+      - ./user_data:/freqtrade/user_data
+    ports:
+      - "8080:8080"
+    command: >
+      trade
+      --config user_data/config.json
+      --strategy LlmFilteredStrategy
+      --db-url sqlite:////freqtrade/user_data/tradesv3.sqlite
+
+2) user_data/config.json
+
+Bunu ~/proj/freqtrade/user_data/config.json içine koy.
+
+{
+  "dry_run": true,
+  "dry_run_wallet": 1000,
+  "stake_currency": "USDT",
+  "stake_amount": 100,
+  "max_open_trades": 1,
+  "tradable_balance_ratio": 0.99,
+  "fiat_display_currency": "USD",
+  "timeframe": "5m",
+  "cancel_open_orders_on_exit": false,
+  "trading_mode": "spot",
+  "margin_mode": "",
+  "unfilledtimeout": {
+    "entry": 10,
+    "exit": 10,
+    "exit_timeout_count": 0,
+    "unit": "minutes"
+  },
+  "entry_pricing": {
+    "price_side": "other",
+    "use_order_book": false
+  },
+  "exit_pricing": {
+    "price_side": "other",
+    "use_order_book": false
+  },
+  "exchange": {
+    "name": "binance",
+    "key": "",
+    "secret": "",
+    "ccxt_config": {},
+    "ccxt_async_config": {},
+    "pair_whitelist": [
+      "BTC/USDT",
+      "ETH/USDT"
+    ],
+    "pair_blacklist": []
+  },
+  "pairlists": [
+    {
+      "method": "StaticPairList"
+    }
+  ],
+  "telegram": {
+    "enabled": false,
+    "token": "",
+    "chat_id": ""
+  },
+  "api_server": {
+    "enabled": false,
+    "listen_ip_address": "0.0.0.0",
+    "listen_port": 8080,
+    "verbosity": "error",
+    "enable_openapi": false,
+    "jwt_secret_key": "changeme",
+    "CORS_origins": [],
+    "username": "freqtrade",
+    "password": "freqtrade"
+  },
+  "bot_name": "ft-llm-bot",
+  "initial_state": "running",
+  "force_entry_enable": false,
+  "internals": {
+    "process_throttle_secs": 5
+  }
+}
+
+3) user_data/strategies/llm_filter.py
+
+Bu dosya Ollama’ya gidip karar sorar.
+Model örneği olarak llama3.1:8b kullandım. İstersen değiştirirsin.
+
+import json
+import requests
+from typing import Dict, Any
+
+
+OLLAMA_URL = "http://host.docker.internal:11434/api/generate"
+OLLAMA_MODEL = "llama3.1:8b"
+
+
+def build_prompt(payload: Dict[str, Any]) -> str:
+    return f"""
+You are a conservative trading filter.
+Your job is NOT to create signals from scratch.
+A technical strategy already produced a BUY signal.
+You only decide whether to ALLOW or REJECT this BUY.
+
+Market snapshot:
+- pair: {payload.get("pair")}
+- timeframe: {payload.get("timeframe")}
+- close: {payload.get("close")}
+- rsi: {payload.get("rsi")}
+- ema_fast: {payload.get("ema_fast")}
+- ema_slow: {payload.get("ema_slow")}
+- volume: {payload.get("volume")}
+- raw_signal: BUY
+
+Rules:
+- Reply with only one word: BUY or SKIP
+- BUY only if trend and momentum look reasonable
+- If uncertain, reply SKIP
+""".strip()
+
+
+def ask_ollama(payload: Dict[str, Any], timeout: int = 30) -> str:
+    prompt = build_prompt(payload)
+
+    body = {
+        "model": OLLAMA_MODEL,
+        "prompt": prompt,
+        "stream": False
+    }
+
+    try:
+        response = requests.post(OLLAMA_URL, json=body, timeout=timeout)
+        response.raise_for_status()
+        data = response.json()
+        text = data.get("response", "").strip().upper()
+
+        if "BUY" in text:
+            return "BUY"
+        return "SKIP"
+
+    except Exception as exc:
+        print(f"[LLM FILTER ERROR] {exc}")
+        return "SKIP"
+
+4) user_data/strategies/LlmFilteredStrategy.py
+
+Bu ana strateji dosyası.
+Teknik sinyal üretir, sonra confirm_trade_entry içinde LLM filtresi uygular.
+
+from typing import Optional
+from pandas import DataFrame
+import talib.abstract as ta
+
+from freqtrade.strategy import IStrategy
+from freqtrade.persistence import Trade
+
+from llm_filter import ask_ollama
+
+
+class LlmFilteredStrategy(IStrategy):
+    INTERFACE_VERSION = 3
+
+    timeframe = "5m"
+    can_short = False
+
+    minimal_roi = {
+        "0": 0.03,
+        "30": 0.02,
+        "60": 0.01
+    }
+
+    stoploss = -0.03
+    trailing_stop = False
+    process_only_new_candles = True
+    startup_candle_count = 50
+
+    use_llm_filter = True
+
+    def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        dataframe["ema_fast"] = ta.EMA(dataframe, timeperiod=20)
+        dataframe["ema_slow"] = ta.EMA(dataframe, timeperiod=50)
+        dataframe["rsi"] = ta.RSI(dataframe, timeperiod=14)
+        return dataframe
+
+    def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        dataframe.loc[
+            (
+                (dataframe["ema_fast"] > dataframe["ema_slow"]) &
+                (dataframe["rsi"] > 50) &
+                (dataframe["rsi"] < 70) &
+                (dataframe["volume"] > 0)
+            ),
+            "enter_long"
+        ] = 1
+
+        return dataframe
+
+    def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        dataframe.loc[
+            (
+                (dataframe["ema_fast"] < dataframe["ema_slow"]) |
+                (dataframe["rsi"] > 75)
+            ),
+            "exit_long"
+        ] = 1
+
+        return dataframe
+
+    def confirm_trade_entry(
+        self,
+        pair: str,
+        order_type: str,
+        amount: float,
+        rate: float,
+        time_in_force: str,
+        current_time,
+        entry_tag: Optional[str],
+        side: str,
+        **kwargs
+    ) -> bool:
+        if not self.use_llm_filter:
+            print(f"[LLM FILTER] disabled -> allow {pair}")
+            return True
+
+        dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+        if dataframe is None or dataframe.empty:
+            print(f"[LLM FILTER] dataframe empty -> reject {pair}")
+            return False
+
+        last = dataframe.iloc[-1]
+
+        payload = {
+            "pair": pair,
+            "timeframe": self.timeframe,
+            "close": float(last["close"]),
+            "rsi": float(last["rsi"]),
+            "ema_fast": float(last["ema_fast"]),
+            "ema_slow": float(last["ema_slow"]),
+            "volume": float(last["volume"])
+        }
+
+        decision = ask_ollama(payload)
+        print(f"[LLM FILTER] {pair} -> {decision}")
+
+        return decision == "BUY"
+
+5) compare_results.py
+
+Bu script iki backtest sonucunu basitçe karşılaştırır.
+Biri normal strateji, biri LLM filtreli gibi düşün.
+
+import json
+from pathlib import Path
+
+
+def load_json(path: str):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def safe_get(dct, *keys, default=None):
+    cur = dct
+    for key in keys:
+        if isinstance(cur, dict) and key in cur:
+            cur = cur[key]
+        else:
+            return default
+    return cur
+
+
+def print_summary(title: str, data: dict):
+    print(f"\n===== {title} =====")
+    print("Total trades   :", safe_get(data, "strategy", "LlmFilteredStrategy", "total_trades"))
+    print("Profit total   :", safe_get(data, "strategy", "LlmFilteredStrategy", "profit_total"))
+    print("Profit %       :", safe_get(data, "strategy", "LlmFilteredStrategy", "profit_total_pct"))
+    print("Winrate        :", safe_get(data, "strategy", "LlmFilteredStrategy", "winrate"))
+    print("Max drawdown   :", safe_get(data, "strategy", "LlmFilteredStrategy", "max_drawdown_account"))
+
+
+if __name__ == "__main__":
+    base_path = Path("base_result.json")
+    llm_path = Path("llm_result.json")
+
+    if not base_path.exists() or not llm_path.exists():
+        print("base_result.json veya llm_result.json bulunamadı.")
+        raise SystemExit(1)
+
+    base = load_json(str(base_path))
+    llm = load_json(str(llm_path))
+
+    print_summary("BASE STRATEGY", base)
+    print_summary("LLM FILTERED STRATEGY", llm)
+
+6) Gerekli Python paketleri
+
+Dockerfile
+FROM freqtradeorg/freqtrade:stable
+
+RUN pip install --no-cache-dir requests
+
