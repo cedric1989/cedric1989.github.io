@@ -1,0 +1,67 @@
+sudo apt update && sudo apt upgrade -y && sudo apt install docker.io docker-compose curl -y && \
+curl -fsSL https://ollama.com/install.sh | sh && \
+mkdir -p ~/proj/ai-night-assistant/app ~/proj/ai-night-assistant/output && cd ~/proj/ai-night-assistant && \
+echo "requests
+feedparser
+python-dateutil" > requirements.txt && \
+echo 'FROM python:3.11-slim
+WORKDIR /code
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY ./app /code/app
+CMD ["python","-m","app.main"]' > Dockerfile && \
+echo 'services:
+  ai-night-assistant:
+    build: .
+    container_name: ai-night-assistant
+    restart: "no"
+    network_mode: "host"
+    volumes:
+      - ./output:/code/output' > docker-compose.yml && \
+echo 'FEEDS = [
+    "https://feeds.feedburner.com/TheHackersNews",
+    "https://www.bleepingcomputer.com/feed/",
+    "https://hnrss.org/frontpage"
+]' > app/feeds.py && \
+cat << 'EOF' > app/main.py
+import os, requests, feedparser
+from datetime import datetime
+from dateutil import tz
+from app.feeds import FEEDS
+
+OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
+MODEL_NAME = "llama3.1:8b"
+OUTPUT_DIR = "/code/output"
+
+def fetch_news(limit_per_feed=4):
+    items = []
+    for feed_url in FEEDS:
+        feed = feedparser.parse(feed_url)
+        for entry in feed.entries[:limit_per_feed]:
+            items.append({"title": entry.get("title",""), "link": entry.get("link",""), "summary": entry.get("summary","")[:500]})
+    return items
+
+def build_prompt(news):
+    news_text = ""
+    for i,n in enumerate(news,start=1):
+        news_text += f"\n{i}. Başlık: {n['title']}\nLink: {n['link']}\nÖzet: {n['summary']}\n"
+    return f"Sen bir teknoloji haber asistanısın. Aşağıdaki haberleri analiz et ve Türkçe bir günlük bülten oluştur. Kurallar: En önemli 5-8 haberi seç, her haber için 2-3 cümle yaz, en sonda kısa bir değerlendirme yap, Markdown formatı kullan.\n\nHaberler:\n{news_text}"
+
+def summarize(prompt):
+    r=requests.post(OLLAMA_URL, json={"model":MODEL_NAME, "prompt":prompt, "stream":False}, timeout=180)
+    r.raise_for_status()
+    return r.json()["response"]
+
+def save_file(text):
+    os.makedirs(OUTPUT_DIR,exist_ok=True)
+    now=datetime.now(tz.gettz("Europe/Istanbul"))
+    path=os.path.join(OUTPUT_DIR,now.strftime("night_brief_%Y-%m-%d.md"))
+    with open(path,"w",encoding="utf8") as f:
+        f.write(f"# AI Gece Asistanı\n\nTarih: {now}\n\n{text}")
+    return path
+
+if __name__=="__main__":
+    print("İşlem başlatıldı..."); news=fetch_news(); prompt=build_prompt(news)
+    print("LLM çalışıyor..."); summary=summarize(prompt); path=save_file(summary)
+    print("Tamamlandı:",path)
+EOF
