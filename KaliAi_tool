@@ -1,0 +1,219 @@
+import re
+import shlex
+import shutil
+import subprocess
+import requests
+
+OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
+MODEL = "qwen2.5:3b"
+
+HELP = """
+Kullanım:
+  1) Tool + target:
+     nmap 127.0.0.1
+     nikto http://127.0.0.1
+     gobuster http://127.0.0.1
+     whatweb https://example.com
+     curl https://example.com
+
+  2) Tam komut:
+     run: nmap -sV -sC 127.0.0.1
+     run: nikto -h http://127.0.0.1
+     run: gobuster dir -u http://127.0.0.1 -w /usr/share/wordlists/dirb/common.txt
+
+  3) Yardım:
+     help
+
+  4) Çıkış:
+     exit
+"""
+
+TOOL_BUILDERS = {
+    "nmap": lambda target: f"nmap -sV {shlex.quote(target)}",
+    "nikto": lambda target: f"nikto -h {shlex.quote(normalize_url(target))}",
+    "gobuster": lambda target: (
+        f"gobuster dir -u {shlex.quote(normalize_url(target))} "
+        f"-w /usr/share/wordlists/dirb/common.txt"
+    ),
+    "whatweb": lambda target: f"whatweb {shlex.quote(normalize_url(target))}",
+    "curl": lambda target: f"curl -I {shlex.quote(normalize_url(target))}",
+    "sqlmap": lambda target: f"sqlmap -u {shlex.quote(normalize_url(target))} --batch",
+    "sslscan": lambda target: f"sslscan {shlex.quote(extract_host(target))}",
+    "whois": lambda target: f"whois {shlex.quote(extract_host(target))}",
+    "dig": lambda target: f"dig {shlex.quote(extract_host(target))}",
+    "nslookup": lambda target: f"nslookup {shlex.quote(extract_host(target))}",
+}
+
+def normalize_url(target: str) -> str:
+    target = target.strip()
+    if target.startswith("http://") or target.startswith("https://"):
+        return target
+    return f"http://{target}"
+
+def extract_host(target: str) -> str:
+    target = target.strip()
+    target = re.sub(r"^https?://", "", target)
+    target = target.split("/")[0]
+    return target
+
+def ask_ollama(prompt: str) -> str:
+    r = requests.post(
+        OLLAMA_URL,
+        json={
+            "model": MODEL,
+            "prompt": prompt,
+            "stream": False,
+        },
+        timeout=240,
+    )
+    r.raise_for_status()
+    return r.json().get("response", "").strip()
+
+def analyze_output(command: str, output: str) -> str:
+    prompt = f"""
+Sen savunma odaklı bir siber güvenlik eğitim asistanısın.
+
+Aşağıdaki komut çıktısını sade Türkçe ile açıkla.
+
+Kurallar:
+- Yalnızca analiz et
+- Zararlı kullanım adımı verme
+- Exploit, brute force, bypass, yetkisiz erişim talimatı verme
+- Şu başlıklarla cevap ver:
+  1. Araç ne yaptı?
+  2. Çıktıda ne bulundu?
+  3. Bu ne anlama geliyor?
+  4. Bu tek başına açık demek mi?
+  5. Yönetici neyi kontrol etmeli?
+
+Komut:
+{command}
+
+Çıktı:
+{output[:15000]}
+"""
+    return ask_ollama(prompt)
+
+def tool_exists(binary: str) -> bool:
+    return shutil.which(binary) is not None
+
+def parse_input(user_input: str):
+    user_input = user_input.strip()
+
+    if not user_input:
+        return ("empty", None)
+
+    if user_input.lower() in {"help", "yardım"}:
+        return ("help", None)
+
+    if user_input.lower() in {"exit", "quit", "çık"}:
+        return ("exit", None)
+
+    if user_input.lower().startswith("run:"):
+        command = user_input[4:].strip()
+        return ("command", command)
+
+    parts = user_input.split(maxsplit=1)
+    tool = parts[0].lower()
+
+    if tool in TOOL_BUILDERS:
+        target = parts[1].strip() if len(parts) > 1 else None
+        return ("tool", (tool, target))
+
+    return ("unknown", user_input)
+
+def build_command(tool: str, target: str) -> str:
+    return TOOL_BUILDERS[tool](target)
+
+def run_command(command: str) -> str:
+    args = shlex.split(command)
+    if not args:
+        return "Boş komut."
+
+    binary = args[0]
+    if not tool_exists(binary):
+        return f"Hata: '{binary}' sistemde kurulu değil."
+
+    try:
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=300
+        )
+        combined = (result.stdout or "") + ("\n" if result.stdout and result.stderr else "") + (result.stderr or "")
+        return combined.strip() or "Komut çıktı üretmedi."
+    except subprocess.TimeoutExpired:
+        return "Hata: Komut zaman aşımına uğradı."
+    except Exception as e:
+        return f"Hata: {e}"
+
+def main():
+    print("AI Kali Agent hazır.")
+    print(HELP)
+
+    while True:
+        try:
+            user_input = input(">>> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nÇıkılıyor.")
+            break
+
+        kind, payload = parse_input(user_input)
+
+        if kind == "empty":
+            continue
+
+        if kind == "help":
+            print(HELP)
+            continue
+
+        if kind == "exit":
+            print("Çıkılıyor.")
+            break
+
+        if kind == "unknown":
+            print("Anlamadım. 'help' yazıp örneklere bak.")
+            continue
+
+        if kind == "tool":
+            tool, target = payload
+
+            if not target:
+                target = input(f"{tool} için hedef gir: ").strip()
+
+            if not target:
+                print("Hedef boş olamaz.")
+                continue
+
+            try:
+                command = build_command(tool, target)
+            except Exception as e:
+                print(f"Komut oluşturulamadı: {e}")
+                continue
+
+        else:  # command
+            command = payload
+
+        print(f"\n[Komut]\n{command}\n")
+
+        output = run_command(command)
+
+        print("[Ham Çıktı]\n")
+        print(output[:6000] if output else "Çıktı yok.")
+
+        if output.startswith("Hata:"):
+            print("\n" + "-" * 70 + "\n")
+            continue
+
+        try:
+            analysis = analyze_output(command, output)
+            print("\n[AI Analiz]\n")
+            print(analysis)
+        except Exception as e:
+            print(f"\n[AI Analiz Hatası]\n{e}")
+
+        print("\n" + "-" * 70 + "\n")
+
+if __name__ == "__main__":
+    main()
