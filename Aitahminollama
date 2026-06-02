@@ -1,0 +1,486 @@
+import os
+from datetime import datetime
+
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import requests
+
+
+# ==========================================================
+# AYARLAR
+# ==========================================================
+
+OLLAMA_MODEL = "qwen2.5:3b"
+OLLAMA_URL = "http://localhost:11434/api/generate"
+
+SIMULATION_DAYS = 21          # Yaklaşık 1 aylık işlem günü
+SIMULATION_COUNT = 1000       # Her hisse için üretilecek senaryo sayısı
+HISTORICAL_PERIOD = "1y"      # Simülasyon için kullanılacak geçmiş veri
+
+OUTPUT_FOLDER = "raporlar"
+GRAPH_FOLDER = "grafikler"
+
+os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+os.makedirs(GRAPH_FOLDER, exist_ok=True)
+
+
+# Demo için seçili BIST hisseleri.
+# Yahoo Finance'ta Borsa İstanbul hisseleri .IS uzantısıyla kullanılır.
+SYMBOLS = [
+    "THYAO.IS",
+    "ASELS.IS",
+    "BIMAS.IS",
+    "KCHOL.IS",
+    "TUPRS.IS",
+    "SISE.IS",
+    "EREGL.IS",
+    "GARAN.IS",
+    "AKBNK.IS",
+    "YKBNK.IS",
+    "SAHOL.IS",
+    "FROTO.IS",
+    "TOASO.IS",
+    "PGSUS.IS",
+    "KOZAL.IS"
+]
+
+
+# ==========================================================
+# YARDIMCI FONKSİYONLAR
+# ==========================================================
+
+def safe_float(value):
+    """
+    yfinance bazen tek değer yerine Series gibi yapılar döndürebiliyor.
+    Bu fonksiyon değeri güvenli şekilde float'a çevirir.
+    """
+    try:
+        return float(value)
+    except TypeError:
+        return float(value.iloc[0])
+
+
+def safe_int(value):
+    """
+    Hacim verisini güvenli şekilde integer'a çevirir.
+    """
+    try:
+        return int(value)
+    except TypeError:
+        return int(value.iloc[0])
+
+
+# ==========================================================
+# 1) GÜNLÜK VERİ ÇEKME VE ANALİZ
+# ==========================================================
+
+def get_daily_stock_data(symbols):
+    rows = []
+
+    for symbol in symbols:
+        try:
+            data = yf.download(
+                symbol,
+                period="10d",
+                interval="1d",
+                progress=False,
+                auto_adjust=True
+            )
+
+            if data.empty or len(data) < 2:
+                print(f"Veri yetersiz: {symbol}")
+                continue
+
+            close_prices = data["Close"].dropna()
+            volumes = data["Volume"].dropna()
+
+            last_close = safe_float(close_prices.iloc[-1])
+            prev_close = safe_float(close_prices.iloc[-2])
+            volume = safe_int(volumes.iloc[-1])
+
+            daily_change = ((last_close - prev_close) / prev_close) * 100
+
+            if len(close_prices) >= 7:
+                week_start = safe_float(close_prices.iloc[-7])
+                weekly_change = ((last_close - week_start) / week_start) * 100
+            else:
+                weekly_change = np.nan
+
+            rows.append({
+                "Hisse": symbol.replace(".IS", ""),
+                "Son Kapanış": round(last_close, 2),
+                "Günlük Değişim %": round(daily_change, 2),
+                "7 Günlük Değişim %": round(weekly_change, 2) if not np.isnan(weekly_change) else None,
+                "Hacim": volume
+            })
+
+        except Exception as e:
+            print(f"Hata oluştu: {symbol} - {e}")
+
+    df = pd.DataFrame(rows)
+
+    if df.empty:
+        raise Exception("Hiçbir hisse için veri alınamadı. İnternet bağlantısını veya sembolleri kontrol et.")
+
+    return df
+
+
+# ==========================================================
+# 2) MONTE CARLO SİMÜLASYONU
+# ==========================================================
+
+def monte_carlo_simulation(
+    symbol,
+    period=HISTORICAL_PERIOD,
+    days=SIMULATION_DAYS,
+    simulations=SIMULATION_COUNT
+):
+    try:
+        data = yf.download(
+            symbol,
+            period=period,
+            interval="1d",
+            progress=False,
+            auto_adjust=True
+        )
+
+        if data.empty or len(data) < 60:
+            print(f"Simülasyon için veri yetersiz: {symbol}")
+            return None
+
+        close_prices = data["Close"].dropna()
+        last_price = safe_float(close_prices.iloc[-1])
+
+        daily_returns = close_prices.pct_change().dropna()
+
+        mean_return = safe_float(daily_returns.mean())
+        volatility = safe_float(daily_returns.std())
+
+        simulation_results = []
+
+        for _ in range(simulations):
+            prices = [last_price]
+
+            for _ in range(days):
+                random_return = np.random.normal(mean_return, volatility)
+                next_price = prices[-1] * (1 + random_return)
+                prices.append(next_price)
+
+            simulation_results.append(prices)
+
+        simulation_results = np.array(simulation_results)
+        final_prices = simulation_results[:, -1]
+
+        expected_price = final_prices.mean()
+        lower_bound = np.percentile(final_prices, 5)
+        upper_bound = np.percentile(final_prices, 95)
+        probability_up = (final_prices > last_price).mean() * 100
+        expected_change = ((expected_price - last_price) / last_price) * 100
+
+        return {
+            "symbol": symbol.replace(".IS", ""),
+            "last_price": round(last_price, 2),
+            "expected_price": round(expected_price, 2),
+            "expected_change": round(expected_change, 2),
+            "lower_bound": round(lower_bound, 2),
+            "upper_bound": round(upper_bound, 2),
+            "probability_up": round(probability_up, 2),
+            "simulation_results": simulation_results
+        }
+
+    except Exception as e:
+        print(f"Simülasyon hatası: {symbol} - {e}")
+        return None
+
+
+def run_all_simulations(symbols):
+    simulation_rows = []
+    simulation_details = {}
+
+    for symbol in symbols:
+        result = monte_carlo_simulation(symbol)
+
+        if result:
+            simulation_rows.append({
+                "Hisse": result["symbol"],
+                "Son Fiyat": result["last_price"],
+                "Beklenen 1 Ay Fiyat": result["expected_price"],
+                "Beklenen Değişim %": result["expected_change"],
+                "Alt Senaryo %5": result["lower_bound"],
+                "Üst Senaryo %95": result["upper_bound"],
+                "Yukarı Olasılık %": result["probability_up"]
+            })
+
+            simulation_details[result["symbol"]] = result
+
+    simulation_df = pd.DataFrame(simulation_rows)
+
+    if simulation_df.empty:
+        raise Exception("Hiçbir hisse için simülasyon üretilemedi.")
+
+    return simulation_df, simulation_details
+
+
+# ==========================================================
+# 3) GRAFİK ÜRETME
+# ==========================================================
+
+def save_simulation_chart(result):
+    symbol = result["symbol"]
+    simulation_results = result["simulation_results"]
+
+    plt.figure(figsize=(10, 6))
+
+    for simulation in simulation_results[:100]:
+        plt.plot(simulation, alpha=0.12)
+
+    plt.title(f"{symbol} - 1 Aylık Monte Carlo Simülasyonu")
+    plt.xlabel("İşlem Günü")
+    plt.ylabel("Fiyat")
+    plt.grid(True)
+
+    chart_path = os.path.join(GRAPH_FOLDER, f"{symbol}_monte_carlo.png")
+    plt.savefig(chart_path, dpi=150, bbox_inches="tight")
+    plt.close()
+
+    return chart_path
+
+
+# ==========================================================
+# 4) OLLAMA İLE AI RAPORU
+# ==========================================================
+
+def generate_ai_report(daily_df, simulation_df):
+    top_gainers = daily_df.sort_values("Günlük Değişim %", ascending=False).head(5)
+    top_losers = daily_df.sort_values("Günlük Değişim %", ascending=True).head(5)
+    volume_leaders = daily_df.sort_values("Hacim", ascending=False).head(5)
+
+    simulation_positive = simulation_df.sort_values("Yukarı Olasılık %", ascending=False).head(5)
+    simulation_expected = simulation_df.sort_values("Beklenen Değişim %", ascending=False).head(5)
+
+    prompt = f"""
+Sen bir finans verisi özetleme asistanısın.
+
+Aşağıdaki veriler Yahoo Finance üzerinden alınmış BIST hisselerine aittir.
+Görevin bu verilerden günlük piyasa raporu hazırlamaktır.
+
+Çok önemli kurallar:
+- Yatırım tavsiyesi verme.
+- Al, sat, tut gibi kesin öneriler verme.
+- Geleceği kesin biliyormuş gibi konuşma.
+- Monte Carlo simülasyonunu tahmin değil, olasılık senaryosu olarak anlat.
+- Doğal, akıcı ve anlaşılır Türkçe kullan.
+- Çeviri gibi duran cümleler kurma.
+- Net başlıklar kullan.
+- Profesyonel ama anlaşılır bir dil kullan.
+- En sonda mutlaka "Bu içerik yatırım tavsiyesi değildir." yaz.
+
+Raporda şu başlıklar olsun:
+
+1. Günlük Genel Görünüm
+2. Günün Güçlü Hisseleri
+3. Günün Zayıf Hisseleri
+4. Hacim Tarafında Dikkat Çekenler
+5. 1 Aylık Monte Carlo Simülasyonu
+6. Yukarı Yön Olasılığı Görece Yüksek Hisseler
+7. Riskler
+8. Kısa Sonuç
+
+Günlük genel tablo:
+{daily_df.to_string(index=False)}
+
+En çok yükselenler:
+{top_gainers.to_string(index=False)}
+
+En çok düşenler:
+{top_losers.to_string(index=False)}
+
+Hacim liderleri:
+{volume_leaders.to_string(index=False)}
+
+1 aylık Monte Carlo simülasyon sonuçları:
+{simulation_df.to_string(index=False)}
+
+Yukarı yön olasılığı en yüksek hisseler:
+{simulation_positive.to_string(index=False)}
+
+Beklenen değişim oranı en yüksek hisseler:
+{simulation_expected.to_string(index=False)}
+"""
+
+    try:
+        response = requests.post(
+            OLLAMA_URL,
+            json={
+                "model": OLLAMA_MODEL,
+                "prompt": prompt,
+                "stream": False
+            },
+            timeout=180
+        )
+
+        response.raise_for_status()
+        result = response.json()
+
+        return result.get("response", "Ollama cevap döndürmedi.")
+
+    except requests.exceptions.ConnectionError:
+        return """
+Ollama bağlantısı kurulamadı.
+
+Kontrol etmek için terminalde şunu çalıştır:
+curl http://localhost:11434
+
+Modeli kontrol etmek için:
+ollama list
+
+Bu içerik yatırım tavsiyesi değildir.
+"""
+
+    except requests.exceptions.Timeout:
+        return """
+Ollama cevap süresi doldu.
+
+Model küçük sistemde yavaş çalışıyor olabilir.
+SIMULATION_COUNT değerini azaltabilir veya daha kısa rapor prompt'u kullanabilirsin.
+
+Bu içerik yatırım tavsiyesi değildir.
+"""
+
+    except Exception as e:
+        return f"""
+AI raporu oluşturulurken hata oluştu:
+
+{e}
+
+Bu içerik yatırım tavsiyesi değildir.
+"""
+
+
+# ==========================================================
+# 5) RAPORU MARKDOWN DOSYASINA KAYDETME
+# ==========================================================
+
+def save_markdown_report(report, daily_df, simulation_df, chart_paths):
+    today = datetime.now().strftime("%Y-%m-%d_%H-%M")
+
+    file_path = os.path.join(
+        OUTPUT_FOLDER,
+        f"bist_ai_simulasyon_raporu_{today}.md"
+    )
+
+    chart_text = ""
+
+    if chart_paths:
+        chart_text += "\n\n## Üretilen Grafikler\n\n"
+        for path in chart_paths:
+            chart_text += f"- {path}\n"
+
+    full_report = f"""
+# BIST AI Günlük Rapor ve 1 Aylık Simülasyon
+
+Tarih: {datetime.now().strftime("%d.%m.%Y %H:%M")}
+
+---
+
+## Günlük Veri Tablosu
+
+{daily_df.to_markdown(index=False)}
+
+---
+
+## 1 Aylık Monte Carlo Simülasyon Tablosu
+
+{simulation_df.to_markdown(index=False)}
+
+---
+
+## AI Yorumu
+
+{report}
+
+{chart_text}
+"""
+
+    with open(file_path, "w", encoding="utf-8") as file:
+        file.write(full_report)
+
+    return file_path
+
+
+# ==========================================================
+# 6) ANA PROGRAM AKIŞI
+# ==========================================================
+
+def main():
+    print("\nBIST AI rapor sistemi başlatıldı...\n")
+
+    print("1/5 - Yahoo Finance üzerinden günlük veriler çekiliyor...")
+    daily_df = get_daily_stock_data(SYMBOLS)
+
+    print("\nGünlük veri tablosu:")
+    print(daily_df)
+
+    print("\n2/5 - Günlük özetler hazırlanıyor...")
+    top_gainers = daily_df.sort_values("Günlük Değişim %", ascending=False).head(5)
+    top_losers = daily_df.sort_values("Günlük Değişim %", ascending=True).head(5)
+    volume_leaders = daily_df.sort_values("Hacim", ascending=False).head(5)
+
+    print("\nEn çok yükselenler:")
+    print(top_gainers)
+
+    print("\nEn çok düşenler:")
+    print(top_losers)
+
+    print("\nHacim liderleri:")
+    print(volume_leaders)
+
+    print("\n3/5 - 1 aylık Monte Carlo simülasyonları çalıştırılıyor...")
+    simulation_df, simulation_details = run_all_simulations(SYMBOLS)
+
+    print("\nSimülasyon sonuçları:")
+    print(simulation_df)
+
+    print("\n4/5 - Grafikler oluşturuluyor...")
+
+    top_simulation_symbols = (
+        simulation_df
+        .sort_values("Yukarı Olasılık %", ascending=False)
+        .head(3)["Hisse"]
+        .tolist()
+    )
+
+    chart_paths = []
+
+    for symbol in top_simulation_symbols:
+        if symbol in simulation_details:
+            chart_path = save_simulation_chart(simulation_details[symbol])
+            chart_paths.append(chart_path)
+
+    print("\nOluşturulan grafikler:")
+    for path in chart_paths:
+        print(path)
+
+    print("\n5/5 - Ollama ile AI raporu oluşturuluyor...")
+    ai_report = generate_ai_report(daily_df, simulation_df)
+
+    print("\nAI RAPORU:")
+    print("-" * 60)
+    print(ai_report)
+    print("-" * 60)
+
+    report_path = save_markdown_report(
+        ai_report,
+        daily_df,
+        simulation_df,
+        chart_paths
+    )
+
+    print(f"\nRapor kaydedildi: {report_path}")
+    print("\nİşlem tamamlandı.")
+
+
+if __name__ == "__main__":
+    main()
