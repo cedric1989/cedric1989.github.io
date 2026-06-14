@@ -1,0 +1,208 @@
+import argparse
+import json
+import sqlite3
+from datetime import datetime
+from pathlib import Path
+
+import pandas as pd
+from rich.console import Console
+from rich.table import Table
+
+from ollama_client import ask_ollama
+
+console = Console()
+
+
+def pick_column(df, candidates):
+    for col in candidates:
+        if col in df.columns:
+            return col
+    return None
+
+
+def read_sqlite_trades(db_path):
+    path = Path(db_path).expanduser()
+
+    if not path.exists():
+        raise FileNotFoundError(f"SQLite DB bulunamadı: {path}")
+
+    conn = sqlite3.connect(path)
+
+    try:
+        df = pd.read_sql_query("SELECT * FROM trades", conn)
+    finally:
+        conn.close()
+
+    return df
+
+
+def normalize_trades(df):
+    if df.empty:
+        return pd.DataFrame()
+
+    pair_col = pick_column(df, ["pair", "symbol"])
+    profit_col = pick_column(df, ["close_profit", "profit_ratio", "profit_abs", "realized_profit"])
+    profit_abs_col = pick_column(df, ["profit_abs", "realized_profit"])
+    open_col = pick_column(df, ["open_date", "open_timestamp"])
+    close_col = pick_column(df, ["close_date", "close_timestamp"])
+    is_open_col = pick_column(df, ["is_open"])
+    enter_tag_col = pick_column(df, ["enter_tag", "buy_tag"])
+    exit_reason_col = pick_column(df, ["exit_reason", "sell_reason"])
+    stake_col = pick_column(df, ["stake_amount", "stake"])
+    amount_col = pick_column(df, ["amount"])
+
+    out = pd.DataFrame()
+
+    out["pair"] = df[pair_col].astype(str) if pair_col else "-"
+    out["profit"] = pd.to_numeric(df[profit_col], errors="coerce") if profit_col else 0
+    out["profit_abs"] = pd.to_numeric(df[profit_abs_col], errors="coerce") if profit_abs_col else 0
+    out["open_date"] = df[open_col].astype(str) if open_col else ""
+    out["close_date"] = df[close_col].astype(str) if close_col else ""
+    out["enter_tag"] = df[enter_tag_col].astype(str) if enter_tag_col else "-"
+    out["exit_reason"] = df[exit_reason_col].astype(str) if exit_reason_col else "-"
+    out["stake_amount"] = pd.to_numeric(df[stake_col], errors="coerce") if stake_col else 0
+    out["amount"] = pd.to_numeric(df[amount_col], errors="coerce") if amount_col else 0
+
+    if is_open_col:
+        out["is_open"] = pd.to_numeric(df[is_open_col], errors="coerce").fillna(0).astype(int)
+    else:
+        out["is_open"] = out["close_date"].isna().astype(int)
+
+    out["is_closed"] = out["is_open"] == 0
+    out["is_win"] = out["profit"] > 0
+    out["is_loss"] = out["profit"] < 0
+
+    return out
+
+
+def calculate_drawdown(profits):
+    if len(profits) == 0:
+        return 0
+
+    equity = pd.Series(profits).fillna(0).cumsum()
+    running_max = equity.cummax()
+    drawdown = equity - running_max
+
+    return round(float(drawdown.min()), 6)
+
+
+def summarize_trades(df):
+    if df.empty:
+        return {
+            "total_trades": 0,
+            "closed_trades": 0,
+            "open_trades": 0,
+            "wins": 0,
+            "losses": 0,
+            "win_rate": 0,
+            "total_profit": 0,
+            "avg_profit": 0,
+            "best_trade": 0,
+            "worst_trade": 0,
+            "profit_factor": 0,
+            "approx_drawdown": 0,
+        }
+
+    closed = df[df["is_closed"]].copy()
+    open_trades = df[df["is_open"] == 1].copy()
+
+    total_closed = len(closed)
+    wins = len(closed[closed["profit"] > 0])
+    losses = len(closed[closed["profit"] < 0])
+
+    win_rate = round((wins / total_closed) * 100, 2) if total_closed else 0
+
+    total_profit = round(float(closed["profit"].sum()), 6) if total_closed else 0
+    avg_profit = round(float(closed["profit"].mean()), 6) if total_closed else 0
+    best_trade = round(float(closed["profit"].max()), 6) if total_closed else 0
+    worst_trade = round(float(closed["profit"].min()), 6) if total_closed else 0
+
+    gross_profit = closed.loc[closed["profit"] > 0, "profit"].sum()
+    gross_loss = abs(closed.loc[closed["profit"] < 0, "profit"].sum())
+
+    if gross_loss > 0:
+        profit_factor = round(float(gross_profit / gross_loss), 3)
+    elif gross_profit > 0:
+        profit_factor = 999
+    else:
+        profit_factor = 0
+
+    approx_drawdown = calculate_drawdown(closed["profit"].tolist())
+
+    return {
+        "total_trades": len(df),
+        "closed_trades": total_closed,
+        "open_trades": len(open_trades),
+        "wins": wins,
+        "losses": losses,
+        "win_rate": win_rate,
+        "total_profit": total_profit,
+        "avg_profit": avg_profit,
+        "best_trade": best_trade,
+        "worst_trade": worst_trade,
+        "profit_factor": profit_factor,
+        "approx_drawdown": approx_drawdown,
+    }
+
+
+def group_stats(df, column_name):
+    if df.empty or column_name not in df.columns:
+        return pd.DataFrame()
+
+    closed = df[df["is_closed"]].copy()
+
+    if closed.empty:
+        return pd.DataFrame()
+
+    grouped = (
+        closed.groupby(column_name)
+        .agg(
+            trade_count=("profit", "count"),
+            total_profit=("profit", "sum"),
+            avg_profit=("profit", "mean"),
+            wins=("is_win", "sum"),
+            losses=("is_loss", "sum"),
+        )
+        .reset_index()
+    )
+
+    grouped["win_rate"] = grouped.apply(
+        lambda r: round((r["wins"] / r["trade_count"]) * 100, 2) if r["trade_count"] else 0,
+        axis=1
+    )
+
+    grouped["total_profit"] = grouped["total_profit"].round(6)
+    grouped["avg_profit"] = grouped["avg_profit"].round(6)
+
+    return grouped.sort_values("total_profit", ascending=True)
+
+
+def read_backtest_json(path):
+    if not path:
+        return {}
+
+    file_path = Path(path).expanduser()
+
+    if not file_path.exists():
+        console.print(f"[yellow]Backtest dosyası bulunamadı:[/yellow] {file_path}")
+        return {}
+
+    try:
+        return json.loads(file_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        console.print(f"[red]Backtest JSON okunamadı:[/red] {e}")
+        return {}
+
+
+def compact_backtest_summary(data):
+    """
+    Freqtrade backtest JSON formatı versiyona ve export tipine göre değişebilir.
+    Bu yüzden agresif parse yapmak yerine önemli alanları yakalamaya çalışıyoruz.
+    """
+    if not data:
+        return {
+            "available": False,
+            "note": "Backtest dosyası verilmedi veya okunamadı."
+        }
+
+    text =
