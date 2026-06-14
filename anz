@@ -1,0 +1,223 @@
+from datetime import datetime
+from pathlib import Path
+
+import pandas as pd
+import yfinance as yf
+from rich.console import Console
+from rich.table import Table
+
+from ollama_client import ask_ollama
+
+console = Console()
+
+
+def read_symbols(path="data/bist_watchlist.txt"):
+    symbols = []
+
+    file_path = Path(path)
+
+    if not file_path.exists():
+        raise FileNotFoundError(f"Hisse listesi bulunamadı: {path}")
+
+    for line in file_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip().upper()
+
+        if line and not line.startswith("#"):
+            symbols.append(line)
+
+    return symbols
+
+
+def to_yahoo_symbol(symbol):
+    if symbol.endswith(".IS"):
+        return symbol
+
+    return f"{symbol}.IS"
+
+
+def fetch_symbol_data(symbol):
+    yahoo_symbol = to_yahoo_symbol(symbol)
+
+    try:
+        df = yf.Ticker(yahoo_symbol).history(period="2mo", interval="1d")
+    except Exception as e:
+        console.print(f"[red]{symbol} veri çekme hatası:[/red] {e}")
+        return None
+
+    if df.empty or len(df) < 25:
+        console.print(f"[yellow]{symbol} için yeterli veri yok.[/yellow]")
+        return None
+
+    df = df.dropna()
+
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    close_price = float(last["Close"])
+    prev_close = float(prev["Close"])
+    open_price = float(last["Open"])
+    high_price = float(last["High"])
+    low_price = float(last["Low"])
+    volume = float(last["Volume"])
+
+    daily_change_pct = ((close_price - prev_close) / prev_close) * 100
+    gap_pct = ((open_price - prev_close) / prev_close) * 100
+    range_pct = ((high_price - low_price) / close_price) * 100 if close_price else 0
+
+    df["SMA20"] = df["Close"].rolling(20).mean()
+    df["VOL20"] = df["Volume"].rolling(20).mean()
+
+    sma20 = float(df["SMA20"].iloc[-1])
+    vol20 = float(df["VOL20"].iloc[-1])
+
+    volume_ratio = volume / vol20 if vol20 > 0 else 0
+
+    if close_price > sma20:
+        trend = "SMA20 üstü"
+    else:
+        trend = "SMA20 altı"
+
+    return {
+        "symbol": symbol,
+        "close": round(close_price, 2),
+        "daily_change_pct": round(daily_change_pct, 2),
+        "gap_pct": round(gap_pct, 2),
+        "range_pct": round(range_pct, 2),
+        "volume": int(volume),
+        "volume_ratio": round(volume_ratio, 2),
+        "sma20": round(sma20, 2),
+        "trend": trend
+    }
+
+
+def create_ai_report(df):
+    top_gainers = df.sort_values("daily_change_pct", ascending=False).head(5)
+    top_losers = df.sort_values("daily_change_pct", ascending=True).head(5)
+    volume_spikes = df.sort_values("volume_ratio", ascending=False).head(5)
+    high_range = df.sort_values("range_pct", ascending=False).head(5)
+
+    system_prompt = """
+Sen bir finans veri analiz asistanısın.
+Kesinlikle yatırım tavsiyesi verme.
+Al, sat, tut gibi yönlendirme yapma.
+Sadece veriyi özetle, riskleri belirt ve kontrol listesi çıkar.
+Cevap Türkçe olsun.
+"""
+
+    user_prompt = f"""
+Aşağıdaki BIST izleme listesi verilerine göre günlük piyasa raporu hazırla.
+
+En çok yükselenler:
+{top_gainers.to_string(index=False)}
+
+En çok düşenler:
+{top_losers.to_string(index=False)}
+
+Hacmi normalin üstüne çıkanlar:
+{volume_spikes.to_string(index=False)}
+
+Gün içi oynaklığı yüksek olanlar:
+{high_range.to_string(index=False)}
+
+Rapor formatı şu şekilde olsun:
+
+1) Günün kısa özeti
+2) En dikkat çeken hisseler
+3) Hacim tarafında öne çıkanlar
+4) Oynaklık tarafında dikkat çekenler
+5) Bu veriler neden tek başına yeterli değildir?
+6) Yarın kontrol edilecek maddeler
+7) Risk uyarısı
+
+Yatırım tavsiyesi verme.
+"""
+
+    return ask_ollama(prompt=user_prompt, system=system_prompt)
+
+
+def show_table(df):
+    table = Table(title="AI Günlük BIST Tarama Tablosu")
+
+    table.add_column("Hisse")
+    table.add_column("Fiyat")
+    table.add_column("% Günlük")
+    table.add_column("Gap %")
+    table.add_column("Oynaklık %")
+    table.add_column("Hacim Oranı")
+    table.add_column("Trend")
+
+    for _, row in df.iterrows():
+        table.add_row(
+            str(row["symbol"]),
+            str(row["close"]),
+            str(row["daily_change_pct"]),
+            str(row["gap_pct"]),
+            str(row["range_pct"]),
+            str(row["volume_ratio"]),
+            str(row["trend"])
+        )
+
+    console.print(table)
+
+
+def main():
+    console.print("[bold cyan]AI Günlük BIST 100 Rapor Sistemi Başladı...[/bold cyan]")
+
+    symbols = read_symbols()
+    rows = []
+
+    for symbol in symbols:
+        console.print(f"[yellow]Veri çekiliyor:[/yellow] {symbol}")
+
+        data = fetch_symbol_data(symbol)
+
+        if data:
+            rows.append(data)
+
+    if not rows:
+        console.print("[red]Hiç veri üretilemedi.[/red]")
+        return
+
+    df = pd.DataFrame(rows)
+
+    show_table(df)
+
+    today = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    csv_path = Path("outputs") / f"bist_gunluk_veri_{today}.csv"
+    report_path = Path("outputs") / f"bist_gunluk_ai_rapor_{today}.md"
+
+    df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+
+    console.print("\n[bold magenta]Ollama AI günlük rapor hazırlıyor...[/bold magenta]")
+
+    ai_report = create_ai_report(df)
+
+    report_text = f"""# AI ile Günlük BIST Raporu
+
+Tarih: {datetime.now().strftime("%d.%m.%Y %H:%M")}
+
+## AI Raporu
+
+{ai_report}
+
+## Ham Veri Tablosu
+
+{df.to_markdown(index=False)}
+
+---
+
+Bu içerik yatırım tavsiyesi değildir. Eğitim, Python otomasyonu ve veri analizi amacıyla hazırlanmıştır.
+"""
+
+    report_path.write_text(report_text, encoding="utf-8")
+
+    console.print("\n[bold green]AI RAPORU[/bold green]")
+    console.print(ai_report)
+
+    console.print(f"\n[green]CSV kaydedildi:[/green] {csv_path}")
+    console.print(f"[green]Markdown rapor kaydedildi:[/green] {report_path}")
+
+
+if __name__ == "__main__":
+    main()
