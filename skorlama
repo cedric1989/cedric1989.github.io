@@ -1,0 +1,384 @@
+from datetime import datetime
+from pathlib import Path
+
+import pandas as pd
+import yfinance as yf
+from rich.console import Console
+from rich.table import Table
+
+from ollama_client import ask_ollama
+
+console = Console()
+
+
+def read_symbols(path="data/bist_watchlist.txt"):
+    """
+    Hisse listesini TXT dosyasından okur.
+    Her satırda bir hisse olacak şekilde çalışır.
+    Örnek:
+    THYAO
+    ASELS
+    SISE
+    """
+    file_path = Path(path)
+
+    if not file_path.exists():
+        raise FileNotFoundError(f"Hisse listesi bulunamadı: {path}")
+
+    symbols = []
+
+    for line in file_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip().upper()
+
+        if line and not line.startswith("#"):
+            symbols.append(line)
+
+    return symbols
+
+
+def to_yahoo_symbol(symbol):
+    """
+    Yahoo Finance BIST hisselerinde .IS uzantısı kullanır.
+    THYAO -> THYAO.IS
+    ASELS -> ASELS.IS
+    """
+    if symbol.endswith(".IS"):
+        return symbol
+
+    return f"{symbol}.IS"
+
+
+def fetch_symbol_data(symbol):
+    """
+    Hissenin son 3 aylık günlük verisini çeker.
+    Bu veriden fiyat, hacim, trend ve oynaklık hesaplanır.
+    """
+    yahoo_symbol = to_yahoo_symbol(symbol)
+
+    try:
+        df = yf.Ticker(yahoo_symbol).history(period="3mo", interval="1d")
+    except Exception as e:
+        console.print(f"[red]{symbol} veri çekme hatası:[/red] {e}")
+        return None
+
+    if df.empty or len(df) < 30:
+        console.print(f"[yellow]{symbol} için yeterli veri yok.[/yellow]")
+        return None
+
+    df = df.dropna()
+
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    close_price = float(last["Close"])
+    prev_close = float(prev["Close"])
+    open_price = float(last["Open"])
+    high_price = float(last["High"])
+    low_price = float(last["Low"])
+    volume = float(last["Volume"])
+
+    daily_change_pct = ((close_price - prev_close) / prev_close) * 100
+    gap_pct = ((open_price - prev_close) / prev_close) * 100
+    range_pct = ((high_price - low_price) / close_price) * 100 if close_price else 0
+
+    df["SMA20"] = df["Close"].rolling(20).mean()
+    df["SMA50"] = df["Close"].rolling(50).mean()
+    df["VOL20"] = df["Volume"].rolling(20).mean()
+
+    sma20 = float(df["SMA20"].iloc[-1])
+    sma50 = float(df["SMA50"].iloc[-1]) if not pd.isna(df["SMA50"].iloc[-1]) else 0
+    vol20 = float(df["VOL20"].iloc[-1])
+
+    volume_ratio = volume / vol20 if vol20 > 0 else 0
+
+    return {
+        "symbol": symbol,
+        "close": round(close_price, 2),
+        "prev_close": round(prev_close, 2),
+        "daily_change_pct": round(daily_change_pct, 2),
+        "gap_pct": round(gap_pct, 2),
+        "range_pct": round(range_pct, 2),
+        "volume": int(volume),
+        "volume_ratio": round(volume_ratio, 2),
+        "sma20": round(sma20, 2),
+        "sma50": round(sma50, 2),
+        "above_sma20": close_price > sma20,
+        "above_sma50": close_price > sma50 if sma50 > 0 else False,
+    }
+
+
+def calculate_score(row):
+    """
+    0-100 arası basit teknik skor üretir.
+
+    Bu skor yatırım tavsiyesi değildir.
+    Amaç hisseleri veri açısından sıralamaktır.
+    """
+
+    score = 50
+    reasons = []
+    risks = []
+
+    # Günlük değişim skoru
+    if row["daily_change_pct"] > 5:
+        score += 10
+        reasons.append("Günlük fiyat hareketi güçlü.")
+        risks.append("Günlük yükseliş sert olduğu için geri çekilme riski izlenmeli.")
+    elif row["daily_change_pct"] > 2:
+        score += 8
+        reasons.append("Günlük değişim pozitif ve dikkat çekici.")
+    elif row["daily_change_pct"] > 0:
+        score += 4
+        reasons.append("Günlük değişim pozitif.")
+    elif row["daily_change_pct"] < -5:
+        score -= 12
+        reasons.append("Günlük düşüş sert.")
+        risks.append("Satış baskısı yüksek olabilir.")
+    elif row["daily_change_pct"] < -2:
+        score -= 8
+        reasons.append("Günlük değişim negatif.")
+    else:
+        reasons.append("Günlük değişim sınırlı.")
+
+    # Hacim skoru
+    if row["volume_ratio"] >= 3:
+        score += 18
+        reasons.append("Hacim 20 günlük ortalamanın çok üzerinde.")
+        risks.append("Aşırı hacim haber, spekülasyon veya sert yön değişimi kaynaklı olabilir.")
+    elif row["volume_ratio"] >= 2:
+        score += 14
+        reasons.append("Hacim normalin belirgin üzerinde.")
+    elif row["volume_ratio"] >= 1.3:
+        score += 8
+        reasons.append("Hacim ortalamanın üzerinde.")
+    elif row["volume_ratio"] < 0.7:
+        score -= 8
+        reasons.append("Hacim zayıf.")
+        risks.append("Hacim düşükse fiyat hareketi güvenilir olmayabilir.")
+
+    # SMA20 skoru
+    if row["above_sma20"]:
+        score += 12
+        reasons.append("Fiyat SMA20 üzerinde.")
+    else:
+        score -= 10
+        reasons.append("Fiyat SMA20 altında.")
+
+    # SMA50 skoru
+    if row["above_sma50"]:
+        score += 8
+        reasons.append("Fiyat SMA50 üzerinde.")
+    else:
+        score -= 6
+        reasons.append("Fiyat SMA50 altında veya SMA50 verisi zayıf.")
+
+    # Gap skoru
+    if row["gap_pct"] > 3:
+        score += 4
+        reasons.append("Yukarı gap dikkat çekiyor.")
+        risks.append("Gap sonrası kapanış gücü ayrıca kontrol edilmeli.")
+    elif row["gap_pct"] < -3:
+        score -= 5
+        reasons.append("Aşağı gap zayıflık gösterebilir.")
+
+    # Oynaklık skoru
+    if row["range_pct"] > 8:
+        score -= 10
+        reasons.append("Gün içi oynaklık çok yüksek.")
+        risks.append("Oynaklık yüksek olduğu için stop mesafesi ve risk yönetimi önemlidir.")
+    elif row["range_pct"] > 5:
+        score -= 4
+        reasons.append("Gün içi oynaklık yüksek.")
+    else:
+        reasons.append("Oynaklık makul seviyede.")
+
+    # Skoru 0-100 arasına sıkıştır
+    score = max(0, min(100, score))
+
+    if score >= 80:
+        label = "Güçlü teknik görünüm"
+    elif score >= 65:
+        label = "Dikkat çekici"
+    elif score >= 50:
+        label = "Nötr / izlenebilir"
+    elif score >= 35:
+        label = "Zayıf"
+    else:
+        label = "Riskli / zayıf görünüm"
+
+    if not risks:
+        risks.append("Teknik skor tek başına karar için yeterli değildir.")
+
+    return score, label, reasons, risks
+
+
+def create_ai_comment(row):
+    """
+    Her hisse için Ollama'dan kısa açıklama alır.
+    AI yatırım tavsiyesi vermeyecek.
+    Sadece skorun neden oluştuğunu açıklayacak.
+    """
+    system_prompt = """
+Sen bir finans veri analiz asistanısın.
+Kesinlikle yatırım tavsiyesi verme.
+Al, sat, tut, hedef fiyat, kesin yükselir gibi ifadeler kullanma.
+Sadece verilen teknik veriyi eğitim amaçlı açıkla.
+Cevap Türkçe olsun.
+"""
+
+    user_prompt = f"""
+Aşağıdaki BIST hissesi için teknik skor açıklaması yap.
+
+Hisse: {row['symbol']}
+Son fiyat: {row['close']}
+Günlük değişim: %{row['daily_change_pct']}
+Gap: %{row['gap_pct']}
+Gün içi oynaklık: %{row['range_pct']}
+Hacim oranı: {row['volume_ratio']}x
+SMA20 üstünde mi: {row['above_sma20']}
+SMA50 üstünde mi: {row['above_sma50']}
+Teknik skor: {row['score']} / 100
+Etiket: {row['score_label']}
+
+Kurallar:
+- Yatırım tavsiyesi verme.
+- Bu hisse alınır/satılır deme.
+- Sadece skorun neden oluştuğunu açıkla.
+- En fazla 8 cümle yaz.
+- Sonunda kısa risk uyarısı ekle.
+
+Format:
+1) Skor yorumu
+2) Güçlü taraf
+3) Zayıf/riskli taraf
+4) Kontrol edilmesi gerekenler
+"""
+
+    return ask_ollama(prompt=user_prompt, system=system_prompt)
+
+
+def show_score_table(df):
+    """
+    Terminalde renkli skor tablosu gösterir.
+    Videoda en güzel görünen kısım burası.
+    """
+    table = Table(title="BIST AI Skorlama Tablosu")
+
+    table.add_column("Sıra")
+    table.add_column("Hisse")
+    table.add_column("Skor")
+    table.add_column("Etiket")
+    table.add_column("% Günlük")
+    table.add_column("Hacim")
+    table.add_column("Oynaklık")
+    table.add_column("SMA20")
+    table.add_column("SMA50")
+
+    for index, (_, row) in enumerate(df.iterrows(), start=1):
+        table.add_row(
+            str(index),
+            str(row["symbol"]),
+            str(row["score"]),
+            str(row["score_label"]),
+            str(row["daily_change_pct"]),
+            str(row["volume_ratio"]),
+            str(row["range_pct"]),
+            "Üstü" if row["above_sma20"] else "Altı",
+            "Üstü" if row["above_sma50"] else "Altı"
+        )
+
+    console.print(table)
+
+
+def main():
+    console.print("[bold cyan]BIST AI Skorlama Sistemi Başladı...[/bold cyan]")
+
+    symbols = read_symbols()
+    rows = []
+
+    for symbol in symbols:
+        console.print(f"[yellow]Veri çekiliyor:[/yellow] {symbol}")
+
+        data = fetch_symbol_data(symbol)
+
+        if not data:
+            continue
+
+        score, label, reasons, risks = calculate_score(data)
+
+        data["score"] = score
+        data["score_label"] = label
+        data["score_reasons"] = " | ".join(reasons)
+        data["score_risks"] = " | ".join(risks)
+
+        rows.append(data)
+
+    if not rows:
+        console.print("[red]Hiç veri üretilemedi.[/red]")
+        return
+
+    df = pd.DataFrame(rows)
+    df = df.sort_values("score", ascending=False).reset_index(drop=True)
+
+    show_score_table(df)
+
+    console.print("\n[bold magenta]En yüksek skorlu ilk 5 hisse için AI açıklaması hazırlanıyor...[/bold magenta]")
+
+    ai_comments = []
+
+    for _, row in df.head(5).iterrows():
+        console.print(f"\n[bold yellow]{row['symbol']} AI açıklaması hazırlanıyor...[/bold yellow]")
+
+        comment = create_ai_comment(row)
+
+        ai_comments.append({
+            "symbol": row["symbol"],
+            "score": row["score"],
+            "score_label": row["score_label"],
+            "comment": comment
+        })
+
+        console.print(f"[bold green]{row['symbol']} AI Yorumu:[/bold green]")
+        console.print(comment)
+
+    today = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    csv_path = Path("outputs") / f"bist_ai_skorlama_{today}.csv"
+    report_path = Path("outputs") / f"bist_ai_skorlama_raporu_{today}.md"
+
+    df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+
+    report_lines = []
+    report_lines.append("# BIST Hisselerini AI'a Puanlattım")
+    report_lines.append("")
+    report_lines.append(f"Tarih: {datetime.now().strftime('%d.%m.%Y %H:%M')}")
+    report_lines.append("")
+    report_lines.append("Bu rapor yatırım tavsiyesi değildir. Eğitim, Python otomasyonu ve veri analizi amacıyla hazırlanmıştır.")
+    report_lines.append("")
+    report_lines.append("## Skor Tablosu")
+    report_lines.append("")
+    report_lines.append(df.to_markdown(index=False))
+    report_lines.append("")
+    report_lines.append("## İlk 5 Hisse İçin AI Açıklaması")
+    report_lines.append("")
+
+    for item in ai_comments:
+        report_lines.append(f"### {item['symbol']} - Skor: {item['score']} / 100")
+        report_lines.append("")
+        report_lines.append(f"Etiket: {item['score_label']}")
+        report_lines.append("")
+        report_lines.append(item["comment"])
+        report_lines.append("")
+        report_lines.append("---")
+        report_lines.append("")
+
+    report_path.write_text("\n".join(report_lines), encoding="utf-8")
+
+    console.print(f"\n[green]CSV kaydedildi:[/green] {csv_path}")
+    console.print(f"[green]Markdown rapor kaydedildi:[/green] {report_path}")
+
+    console.print("\n[bold cyan]İşlem tamamlandı.[/bold cyan]")
+
+
+if __name__ == "__main__":
+    main()
