@@ -1,0 +1,506 @@
+from datetime import datetime
+from pathlib import Path
+import re
+
+import pandas as pd
+from rich.console import Console
+from rich.table import Table
+
+from ollama_client import ask_ollama
+
+console = Console()
+
+INPUT_FILE = Path("data/youtube_ideas.csv")
+OUTPUT_DIR = Path("outputs")
+OUTPUT_DIR.mkdir(exist_ok=True)
+
+
+POWER_WORDS = [
+    "yaptım", "test ettim", "denedim", "kurulum", "nasıl", "en iyi",
+    "gerçek", "hata", "neden", "karşılaştırma", "otomasyon", "bot",
+    "puanlama", "analiz", "sistem", "sonuç", "işe yarıyor", "saldırı",
+    "local ai", "ollama", "python"
+]
+
+SEARCH_INTENT_WORDS = [
+    "nasıl", "nedir", "kurulum", "test", "karşılaştırma", "analiz",
+    "python", "ollama", "youtube", "seo", "ctr", "bist", "bot",
+    "log", "siber güvenlik"
+]
+
+CLICKBAIT_RISK_WORDS = [
+    "garanti", "kesin", "şok", "inanılmaz", "milyoner", "uçacak",
+    "patlayacak", "asla kaçırma", "bunu izleyen kazanır"
+]
+
+
+def normalize_text(text):
+    if pd.isna(text):
+        return ""
+
+    return str(text).strip()
+
+
+def count_words(text):
+    return len([w for w in text.split() if w.strip()])
+
+
+def contains_number(text):
+    return bool(re.search(r"\d+", text))
+
+
+def keyword_match_score(text, target_keyword):
+    """
+    Hedef anahtar kelimedeki kelimeler başlıkta/açıklamada geçiyor mu?
+    Google ve YouTube arama uyumu için basit bir ölçüm.
+    """
+    text_lower = text.lower()
+    keyword_lower = target_keyword.lower()
+
+    keyword_words = [
+        word.strip()
+        for word in re.split(r"\s+", keyword_lower)
+        if len(word.strip()) > 2
+    ]
+
+    if not keyword_words:
+        return 0
+
+    hits = sum(1 for word in keyword_words if word in text_lower)
+    return round((hits / len(keyword_words)) * 100, 2)
+
+
+def score_title(title, target_keyword):
+    """
+    Başlığı 0-100 arasında puanlar.
+    Burada amaç:
+    - Arama kelimesi var mı?
+    - Çok uzun mu?
+    - Merak uyandırıyor mu?
+    - Net çıktı vaat ediyor mu?
+    - Clickbait riski var mı?
+    """
+
+    title = normalize_text(title)
+    target_keyword = normalize_text(target_keyword)
+
+    score = 50
+    reasons = []
+    warnings = []
+
+    title_lower = title.lower()
+    word_count = count_words(title)
+
+    # Uzunluk kontrolü
+    if 6 <= word_count <= 12:
+        score += 15
+        reasons.append("Başlık uzunluğu okunabilir seviyede.")
+    elif 13 <= word_count <= 16:
+        score += 8
+        reasons.append("Başlık biraz uzun ama hâlâ kullanılabilir.")
+    elif word_count < 5:
+        score -= 12
+        warnings.append("Başlık çok kısa; arama niyeti ve vaat zayıf kalabilir.")
+    else:
+        score -= 10
+        warnings.append("Başlık uzun; mobil ekranda kesilebilir.")
+
+    # Anahtar kelime uyumu
+    keyword_score = keyword_match_score(title, target_keyword)
+
+    if keyword_score >= 70:
+        score += 18
+        reasons.append("Hedef anahtar kelime başlıkta güçlü şekilde geçiyor.")
+    elif keyword_score >= 40:
+        score += 10
+        reasons.append("Hedef anahtar kelimenin bir kısmı başlıkta var.")
+    else:
+        score -= 8
+        warnings.append("Başlık hedef arama kelimesiyle zayıf eşleşiyor.")
+
+    # Güçlü kelime kontrolü
+    power_hits = [word for word in POWER_WORDS if word in title_lower]
+
+    if len(power_hits) >= 2:
+        score += 12
+        reasons.append(f"Başlıkta dikkat çeken kelimeler var: {', '.join(power_hits[:3])}")
+    elif len(power_hits) == 1:
+        score += 6
+        reasons.append(f"Başlıkta dikkat çeken kelime var: {power_hits[0]}")
+    else:
+        warnings.append("Başlıkta merak veya fayda hissi veren kelime az.")
+
+    # Arama niyeti
+    intent_hits = [word for word in SEARCH_INTENT_WORDS if word in title_lower]
+
+    if len(intent_hits) >= 2:
+        score += 10
+        reasons.append("Başlık YouTube/Google arama niyetine uygun.")
+    elif len(intent_hits) == 1:
+        score += 5
+        reasons.append("Başlıkta en az bir arama niyeti kelimesi var.")
+
+    # Sayı kullanımı
+    if contains_number(title):
+        score += 5
+        reasons.append("Başlıkta sayı var; liste/sonuç hissi verebilir.")
+
+    # Soru etkisi
+    if "?" in title or "hangisi" in title_lower or "neden" in title_lower:
+        score += 6
+        reasons.append("Başlık soru/merak formatına yakın.")
+
+    # Clickbait riski
+    clickbait_hits = [word for word in CLICKBAIT_RISK_WORDS if word in title_lower]
+
+    if clickbait_hits:
+        score -= 18
+        warnings.append(f"Clickbait riski var: {', '.join(clickbait_hits)}")
+
+    score = max(0, min(100, score))
+
+    return {
+        "title_score": score,
+        "title_reasons": " | ".join(reasons) if reasons else "Güçlü sebep bulunamadı.",
+        "title_warnings": " | ".join(warnings) if warnings else "Belirgin uyarı yok."
+    }
+
+
+def score_thumbnail(thumbnail_text, title):
+    """
+    Thumbnail yazısını puanlar.
+    Kriter:
+    - Kısa mı?
+    - Başlığı tekrar mı ediyor?
+    - Merak veya net fayda var mı?
+    - Ekranda okunabilir mi?
+    """
+
+    thumbnail_text = normalize_text(thumbnail_text)
+    title = normalize_text(title)
+
+    score = 50
+    reasons = []
+    warnings = []
+
+    thumb_lower = thumbnail_text.lower()
+    title_lower = title.lower()
+    word_count = count_words(thumbnail_text)
+
+    if 2 <= word_count <= 5:
+        score += 20
+        reasons.append("Thumbnail yazısı kısa ve okunabilir.")
+    elif 6 <= word_count <= 7:
+        score += 8
+        reasons.append("Thumbnail yazısı biraz uzun ama kullanılabilir.")
+    elif word_count < 2:
+        score -= 10
+        warnings.append("Thumbnail yazısı çok kısa; mesaj zayıf kalabilir.")
+    else:
+        score -= 20
+        warnings.append("Thumbnail yazısı uzun; mobilde okunması zorlaşır.")
+
+    # Başlığı tamamen tekrar ediyor mu?
+    common_words = set(thumb_lower.split()).intersection(set(title_lower.split()))
+
+    if len(common_words) >= max(2, word_count - 1):
+        score -= 10
+        warnings.append("Thumbnail başlığı fazla tekrar ediyor olabilir.")
+    else:
+        score += 8
+        reasons.append("Thumbnail başlıktan farklı bir vurgu veriyor.")
+
+    # Güçlü kelime kontrolü
+    power_hits = [word for word in POWER_WORDS if word in thumb_lower]
+
+    if power_hits:
+        score += 10
+        reasons.append(f"Thumbnail dikkat çeken kelime içeriyor: {', '.join(power_hits[:2])}")
+
+    # Büyük harf kullanımı ekranda vurgu verir; ama tamamen şart değil
+    uppercase_letters = sum(1 for ch in thumbnail_text if ch.isupper())
+    all_letters = sum(1 for ch in thumbnail_text if ch.isalpha())
+
+    if all_letters > 0:
+        uppercase_ratio = uppercase_letters / all_letters
+    else:
+        uppercase_ratio = 0
+
+    if uppercase_ratio > 0.6:
+        score += 5
+        reasons.append("Büyük harf oranı yüksek; thumbnail vurgusu güçlü olabilir.")
+
+    score = max(0, min(100, score))
+
+    return {
+        "thumbnail_score": score,
+        "thumbnail_reasons": " | ".join(reasons) if reasons else "Güçlü sebep bulunamadı.",
+        "thumbnail_warnings": " | ".join(warnings) if warnings else "Belirgin uyarı yok."
+    }
+
+
+def score_description(description, target_keyword):
+    """
+    Açıklama metninin arama uyumunu ölçer.
+    Açıklamanın ilk kısmında konu ve anahtar kelime net geçmeli.
+    """
+
+    description = normalize_text(description)
+    target_keyword = normalize_text(target_keyword)
+
+    score = 50
+    reasons = []
+    warnings = []
+
+    desc_lower = description.lower()
+    word_count = count_words(description)
+
+    if 20 <= word_count <= 80:
+        score += 15
+        reasons.append("Açıklama kısa ama konuyu anlatacak kadar dolu.")
+    elif word_count < 15:
+        score -= 10
+        warnings.append("Açıklama kısa; arama bağlamı zayıf kalabilir.")
+    else:
+        score += 5
+        reasons.append("Açıklama yeterince detaylı.")
+
+    keyword_score = keyword_match_score(description, target_keyword)
+
+    if keyword_score >= 70:
+        score += 20
+        reasons.append("Hedef anahtar kelime açıklamada güçlü şekilde geçiyor.")
+    elif keyword_score >= 40:
+        score += 10
+        reasons.append("Hedef anahtar kelimenin bir kısmı açıklamada var.")
+    else:
+        score -= 10
+        warnings.append("Açıklama hedef anahtar kelimeyle zayıf eşleşiyor.")
+
+    intent_hits = [word for word in SEARCH_INTENT_WORDS if word in desc_lower]
+
+    if len(intent_hits) >= 3:
+        score += 10
+        reasons.append("Açıklama arama niyeti kelimeleri içeriyor.")
+
+    score = max(0, min(100, score))
+
+    return {
+        "description_score": score,
+        "description_reasons": " | ".join(reasons) if reasons else "Güçlü sebep bulunamadı.",
+        "description_warnings": " | ".join(warnings) if warnings else "Belirgin uyarı yok."
+    }
+
+
+def calculate_final_score(row):
+    """
+    Final skor:
+    Başlık daha önemli.
+    Thumbnail ikinci.
+    Açıklama üçüncü.
+    """
+    final_score = round(
+        row["title_score"] * 0.45 +
+        row["thumbnail_score"] * 0.35 +
+        row["description_score"] * 0.20,
+        2
+    )
+
+    if final_score >= 85:
+        label = "Çok güçlü"
+    elif final_score >= 75:
+        label = "Güçlü"
+    elif final_score >= 65:
+        label = "İyileştirilebilir"
+    elif final_score >= 50:
+        label = "Orta"
+    else:
+        label = "Zayıf"
+
+    return final_score, label
+
+
+def create_ai_review(row):
+    """
+    Ollama başlığı eleştirir ve iyileştirilmiş alternatifler üretir.
+    """
+
+    system_prompt = """
+Sen YouTube SEO ve thumbnail analiz asistanısın.
+Türkçe cevap ver.
+Abartılı clickbait önerme.
+Google ve YouTube arama niyetine uygun başlık öner.
+Net, pratik, uygulanabilir yorum yap.
+"""
+
+    user_prompt = f"""
+Aşağıdaki YouTube video fikrini analiz et:
+
+Konu: {row['topic']}
+Başlık: {row['title']}
+Thumbnail yazısı: {row['thumbnail_text']}
+Açıklama: {row['description']}
+Hedef anahtar kelime: {row['target_keyword']}
+
+Skorlar:
+Başlık skoru: {row['title_score']}
+Thumbnail skoru: {row['thumbnail_score']}
+Açıklama skoru: {row['description_score']}
+Final skor: {row['final_score']}
+Etiket: {row['final_label']}
+
+Kurallar:
+- Cevap Türkçe olsun.
+- Çok uzun yazma.
+- Başlığın güçlü ve zayıf yanını söyle.
+- Thumbnail yazısı uygun mu söyle.
+- Google/YouTube arama açısından eksik kelimeleri belirt.
+- 5 alternatif başlık üret.
+- 3 alternatif thumbnail yazısı üret.
+
+Format:
+1) Genel yorum
+2) Başlıkta güçlü taraf
+3) Başlıkta zayıf taraf
+4) Thumbnail yorumu
+5) Arama/SEO önerisi
+6) 5 alternatif başlık
+7) 3 thumbnail alternatifi
+"""
+
+    return ask_ollama(prompt=user_prompt, system=system_prompt)
+
+
+def show_table(df):
+    table = Table(title="YouTube Başlık + Thumbnail Skorlama Tablosu")
+
+    table.add_column("Sıra")
+    table.add_column("Konu")
+    table.add_column("Final")
+    table.add_column("Etiket")
+    table.add_column("Başlık")
+    table.add_column("Thumb")
+    table.add_column("Açıklama")
+
+    for index, (_, row) in enumerate(df.iterrows(), start=1):
+        table.add_row(
+            str(index),
+            str(row["topic"])[:25],
+            str(row["final_score"]),
+            str(row["final_label"]),
+            str(row["title_score"]),
+            str(row["thumbnail_score"]),
+            str(row["description_score"])
+        )
+
+    console.print(table)
+
+
+def main():
+    console.print("[bold cyan]YouTube Başlık ve Thumbnail Skorlama Sistemi Başladı...[/bold cyan]")
+
+    if not INPUT_FILE.exists():
+        console.print(f"[red]Girdi dosyası bulunamadı:[/red] {INPUT_FILE}")
+        console.print("[yellow]Önce data/youtube_ideas.csv dosyasını oluştur.[/yellow]")
+        return
+
+    df = pd.read_csv(INPUT_FILE)
+
+    required_columns = ["topic", "title", "thumbnail_text", "description", "target_keyword"]
+
+    for col in required_columns:
+        if col not in df.columns:
+            console.print(f"[red]Eksik kolon:[/red] {col}")
+            return
+
+    rows = []
+
+    for _, item in df.iterrows():
+        row = {
+            "topic": normalize_text(item["topic"]),
+            "title": normalize_text(item["title"]),
+            "thumbnail_text": normalize_text(item["thumbnail_text"]),
+            "description": normalize_text(item["description"]),
+            "target_keyword": normalize_text(item["target_keyword"])
+        }
+
+        title_result = score_title(row["title"], row["target_keyword"])
+        thumb_result = score_thumbnail(row["thumbnail_text"], row["title"])
+        desc_result = score_description(row["description"], row["target_keyword"])
+
+        row.update(title_result)
+        row.update(thumb_result)
+        row.update(desc_result)
+
+        final_score, final_label = calculate_final_score(row)
+
+        row["final_score"] = final_score
+        row["final_label"] = final_label
+
+        rows.append(row)
+
+    result_df = pd.DataFrame(rows)
+    result_df = result_df.sort_values("final_score", ascending=False).reset_index(drop=True)
+
+    show_table(result_df)
+
+    console.print("\n[bold magenta]En iyi 3 fikir için AI yorumları hazırlanıyor...[/bold magenta]")
+
+    ai_reviews = []
+
+    for _, row in result_df.head(3).iterrows():
+        console.print(f"\n[yellow]AI analiz ediyor:[/yellow] {row['title']}")
+
+        ai_text = create_ai_review(row)
+
+        ai_reviews.append({
+            "topic": row["topic"],
+            "title": row["title"],
+            "final_score": row["final_score"],
+            "final_label": row["final_label"],
+            "ai_review": ai_text
+        })
+
+        console.print(f"[green]AI Yorumu - {row['topic']}[/green]")
+        console.print(ai_text)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    csv_path = OUTPUT_DIR / f"youtube_title_thumbnail_scores_{timestamp}.csv"
+    report_path = OUTPUT_DIR / f"youtube_title_thumbnail_report_{timestamp}.md"
+
+    result_df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+
+    lines = []
+    lines.append("# AI ile YouTube Başlık ve Thumbnail Skorlama Raporu")
+    lines.append("")
+    lines.append(f"Tarih: {datetime.now().strftime('%d.%m.%Y %H:%M')}")
+    lines.append("")
+    lines.append("## Skor Tablosu")
+    lines.append("")
+    lines.append(result_df.to_markdown(index=False))
+    lines.append("")
+    lines.append("## En İyi 3 Fikir İçin AI Yorumu")
+    lines.append("")
+
+    for review in ai_reviews:
+        lines.append(f"### {review['topic']} - {review['final_score']} / 100")
+        lines.append("")
+        lines.append(f"Başlık: {review['title']}")
+        lines.append("")
+        lines.append(f"Etiket: {review['final_label']}")
+        lines.append("")
+        lines.append(review["ai_review"])
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+
+    report_path.write_text("\n".join(lines), encoding="utf-8")
+
+    console.print(f"\n[green]CSV kaydedildi:[/green] {csv_path}")
+    console.print(f"[green]Markdown rapor kaydedildi:[/green] {report_path}")
+    console.print("\n[bold cyan]İşlem tamamlandı.[/bold cyan]")
+
+
+if __name__ == "__main__":
+    main()
