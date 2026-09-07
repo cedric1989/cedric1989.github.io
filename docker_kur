@@ -1,0 +1,373 @@
+DOCKER DESKTOP WINDOWS 10 — SİSTEM GEREKSİNİMLERİ VE KURULUM
+PowerShell Komut Referansı
+
+============================================================
+1. AMAÇ
+============================================================
+
+Bu doküman Windows 10 üzerinde Docker Desktop'ın WSL 2 altyapısıyla kurulması ve doğrulanması için gereken sistem koşullarını, kurulum komutlarını ve kontrol adımlarını içerir.
+
+Tüm komutlar Windows PowerShell üzerinde tek satır olarak çalıştırılmalıdır.
+
+============================================================
+2. SİSTEM GEREKSİNİMLERİ
+============================================================
+
+Zorunlu işletim sistemi:
+
+- Windows 10 Pro, Enterprise veya Education
+- Sürüm: 22H2
+- Minimum yapı: 19045
+- Mimari: 64-bit
+
+Zorunlu donanım ve özellikler:
+
+- 64-bit işlemci
+- BIOS/UEFI içinde donanım sanallaştırma desteği
+- WSL 2
+- En az 8 GB RAM önerilir
+- Kurulum için yönetici yetkisi
+- Docker imajlarını indirmek için internet bağlantısı
+- Sistem diskinde yeterli boş alan
+
+Bu sistemde doğrulanan ortam:
+
+- Windows 10 Pro
+- Windows sürümü: 2009 / 22H2
+- Windows yapı numarası: 19045
+- İşletim sistemi mimarisi: 64-bit
+- WSL: 2.6.3.0
+- WSL Kernel: 6.6.87.2-1
+- Docker Engine: 29.7.2
+- Docker Compose: 5.5.0
+- Docker mimarisi: x86_64
+
+============================================================
+3. WINDOWS SÜRÜM KONTROLÜ
+============================================================
+
+Komut:
+
+Get-ComputerInfo | Select-Object WindowsProductName,WindowsVersion,OsBuildNumber,OsArchitecture
+
+Komutun görevi:
+
+Windows ürününü, sürümünü, yapı numarasını ve işlemci mimarisini gösterir.
+
+Beklenen değerler:
+
+WindowsProductName : Windows 10 Pro
+WindowsVersion     : 2009
+OsBuildNumber      : 19045
+OsArchitecture     : 64-bit
+
+Başarı ölçütü:
+
+Sistem Windows 10 22H2, build 19045 ve 64-bit olmalıdır.
+
+============================================================
+4. DONANIM SANALLAŞTIRMA KONTROLÜ
+============================================================
+
+Komut:
+
+Get-CimInstance Win32_Processor | Select-Object Name,VirtualizationFirmwareEnabled,SecondLevelAddressTranslationExtensions
+
+Komutun görevi:
+
+İşlemcinin BIOS/UEFI sanallaştırma özelliğini ve SLAT desteğini kontrol eder.
+
+Beklenen değerler:
+
+VirtualizationFirmwareEnabled                  : True
+SecondLevelAddressTranslationExtensions        : True
+
+Başarı ölçütü:
+
+Her iki değer de True olmalıdır. VirtualizationFirmwareEnabled False ise BIOS/UEFI içinden Intel VT-x veya AMD SVM özelliği etkinleştirilmelidir.
+
+============================================================
+5. WSL KONTROLÜ VE KURULUMU
+============================================================
+
+Sürüm kontrol komutu:
+
+wsl --version
+
+Komutun görevi:
+
+Kurulu WSL, Linux kernel ve WSLg sürümlerini gösterir.
+
+Bu sistemde alınan çıktı:
+
+WSL version: 2.6.3.0
+Kernel version: 6.6.87.2-1
+WSLg version: 1.0.71
+Windows version: 10.0.19045.6466
+
+Başarı ölçütü:
+
+WSL sürüm ve kernel bilgileri görüntülenmelidir.
+
+WSL kurulu değilse Yönetici PowerShell komutu:
+
+wsl --install
+
+Komutun görevi:
+
+WSL bileşenlerini ve varsayılan Linux dağıtımını kurar.
+
+WSL güncelleme komutu:
+
+wsl --update
+
+Komutun görevi:
+
+WSL ve Linux kernel bileşenlerini mevcut en güncel sürüme yükseltir.
+
+Yeniden başlatma gerekiyorsa:
+
+Restart-Computer
+
+UYARI:
+
+Restart-Computer bilgisayarı hemen yeniden başlatır. Komut çalıştırılmadan önce açık dosyalar kaydedilmelidir.
+
+============================================================
+6. DOCKER DESKTOP KURULUM DOSYASINI İNDİRME
+============================================================
+
+Komut:
+
+Invoke-WebRequest -Uri "https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe" -OutFile "$env:USERPROFILE\Downloads\DockerDesktopInstaller.exe"
+
+Komutun görevi:
+
+Docker Desktop 64-bit Windows kurulum dosyasını aktif kullanıcının Downloads klasörüne indirir.
+
+Beklenen davranış:
+
+Başarılı indirme sonrasında PowerShell herhangi bir mesaj göstermeden yeni komut satırına dönebilir.
+
+Dosya kontrol komutu:
+
+Get-Item "$env:USERPROFILE\Downloads\DockerDesktopInstaller.exe"
+
+Başarı ölçütü:
+
+Çıktıda DockerDesktopInstaller.exe dosyasının adı, dosya boyutu ve tarihi görünmelidir.
+
+ÖNEMLİ:
+
+PowerShell parametresi -OutFile şeklinde bitişik yazılmalıdır. "- OutFile" kullanımı geçersizdir.
+
+============================================================
+7. DOCKER DESKTOP KURULUMU
+============================================================
+
+Gereken yetki:
+
+Yönetici PowerShell
+
+Kurulum komutu:
+
+Start-Process -FilePath "$env:USERPROFILE\Downloads\DockerDesktopInstaller.exe" -ArgumentList "install","--accept-license","--backend=wsl-2" -Verb RunAs -Wait
+
+Komutun görevi:
+
+Docker Desktop'ı lisans şartlarını kabul ederek WSL 2 backend ile kurar ve kurulum tamamlanana kadar PowerShell'i bekletir.
+
+Beklenen davranış:
+
+- Windows Kullanıcı Hesabı Denetimi penceresi açılır.
+- İzin verildikten sonra Docker Desktop kurulumu başlar.
+- Kurulum tamamlandığında PowerShell komut satırına döner.
+
+Kurulum sonrası gereksinim:
+
+- Windows yeniden başlatılmalıdır.
+- Başlat menüsünden Docker Desktop açılmalıdır.
+- Docker Desktop üzerinde Engine running durumu beklenmelidir.
+
+============================================================
+8. DOCKER DESKTOP AYAR KONTROLÜ
+============================================================
+
+Kontrol yolu:
+
+Docker Desktop > Settings > General > Use the WSL 2 based engine
+
+Gerekli değer:
+
+Seçenek etkin olmalıdır.
+
+İlk çalıştırma durumu:
+
+Docker hesabıyla giriş, kişisel/eğitim amaçlı temel yerel kullanım için zorunlu değildir. Organizasyon politikaları farklı gereksinimler uygulayabilir.
+
+============================================================
+9. DOCKER CLI DOĞRULAMASI
+============================================================
+
+Komut:
+
+docker --version
+
+Komutun görevi:
+
+Docker komut satırı aracının kurulu ve Windows PATH değişkeni üzerinden erişilebilir olduğunu doğrular.
+
+Bu sistemde alınan çıktı:
+
+Docker version 29.7.2, build a7dcaa6
+
+Başarı ölçütü:
+
+Docker sürüm ve build bilgisi görünmelidir. Sürüm numarası kurulum tarihine göre değişebilir.
+
+============================================================
+10. DOCKER COMPOSE DOĞRULAMASI
+============================================================
+
+Komut:
+
+docker compose version
+
+Komutun görevi:
+
+Docker Compose eklentisinin kurulu olduğunu doğrular.
+
+Bu sistemde alınan çıktı:
+
+Docker Compose version v5.5.0
+
+Başarı ölçütü:
+
+Docker Compose sürümü görüntülenmelidir.
+
+Kullanım biçimi:
+
+Güncel komut "docker compose" şeklindedir. Eski bağımsız "docker-compose" komutu kullanılmaz.
+
+============================================================
+11. DOCKER ENGINE DOĞRULAMASI
+============================================================
+
+Engine bilgi komutu:
+
+docker info --format "Docker Engine: {{.ServerVersion}} | OS: {{.OperatingSystem}} | Architecture: {{.Architecture}}"
+
+Komutun görevi:
+
+Docker CLI ile Docker Engine arasındaki bağlantıyı, sunucu sürümünü, işletim sistemini ve mimariyi kontrol eder.
+
+Bu sistemde alınan çıktı:
+
+Docker Engine: 29.7.2 | OS: Docker Desktop | Architecture: x86_64
+
+Test konteyneri komutu:
+
+docker run --rm hello-world
+
+Komutun görevi:
+
+hello-world imajını indirir, geçici bir test konteyneri çalıştırır ve tamamlandıktan sonra konteyneri otomatik kaldırır.
+
+Başarı ölçütü:
+
+Çıktıda aşağıdaki ifade bulunmalıdır:
+
+Hello from Docker!
+
+Bu sonuç; imaj indirme, konteyner oluşturma, Docker Engine çalışması ve terminal bağlantısının başarılı olduğunu doğrular.
+
+============================================================
+12. SON DOĞRULAMA
+============================================================
+
+Tüm kontrolleri tek satırda çalıştırma:
+
+docker --version; docker compose version; docker info --format "Docker Engine: {{.ServerVersion}} | OS: {{.OperatingSystem}} | Architecture: {{.Architecture}}"; docker run --rm hello-world
+
+Kurulum tamamlanma ölçütleri:
+
+- docker --version başarılı
+- docker compose version başarılı
+- docker info sunucu bilgisi gösteriyor
+- hello-world çıktısı başarılı
+- Docker Desktop durumu Engine running
+
+============================================================
+13. SIK HATALAR
+============================================================
+
+Hata:
+
+winget : The term 'winget' is not recognized
+
+Neden:
+
+Microsoft App Installer veya Winget sistemde bulunmuyor.
+
+Çözüm:
+
+Winget zorunlu değildir. Docker Desktop kurulum dosyası Invoke-WebRequest komutuyla doğrudan indirilebilir.
+
+------------------------------------------------------------
+
+Hata:
+
+docker : The term 'docker' is not recognized
+
+Olası nedenler:
+
+- Docker Desktop kurulmamış olabilir.
+- Kurulum sonrası Windows yeniden başlatılmamış olabilir.
+- Eski PowerShell penceresi açık olabilir.
+- Docker yolu PATH değişkenine henüz yüklenmemiş olabilir.
+
+Çözüm:
+
+Windows'u yeniden başlatın, Docker Desktop'ı açın, Engine running durumunu bekleyin ve yeni bir PowerShell penceresi açın.
+
+------------------------------------------------------------
+
+Hata:
+
+Cannot connect to the Docker daemon
+
+Neden:
+
+Docker Desktop kapalıdır veya Docker Engine henüz hazır değildir.
+
+Çözüm:
+
+Docker Desktop'ı açın ve Engine running durumunu bekleyin.
+
+------------------------------------------------------------
+
+Hata:
+
+WSL veya kernel bağlantı problemi
+
+Çözüm komutları:
+
+wsl --update
+
+wsl --shutdown
+
+İşlem sonrasında Docker Desktop yeniden açılmalıdır.
+
+============================================================
+14. SONUÇ
+============================================================
+
+Bu gereksinimler ve doğrulama adımları tamamlandığında Windows 10 üzerinde aşağıdaki bileşenler kullanıma hazırdır:
+
+- WSL 2
+- Docker Desktop
+- Docker Engine
+- Docker Compose
+- Linux tabanlı Docker konteynerlerini çalıştırma altyapısı
+
+Bu aşamadan sonra Freqtrade Docker Compose kurulumu başlatılabilir.
